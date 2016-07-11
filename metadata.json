@@ -1,9 +1,9 @@
 {
-  "name": "ispavailability-file_concat",
-  "version": "0.3.0",
-  "author": "ispavailability",
-  "summary": "Concatenates multiple files into 1",
-  "license": "Apache 2.0",
+  "name": "electrical-file_concat",
+  "version": "1.0.1",
+  "author": "electrical",
+  "summary": "Library for concatenating multiple files into 1",
+  "license": "Apache-2.0",
   "source": "http://github.com/electrical/puppet-lib-file_concat",
   "project_page": "https://github.com/electrical/puppet-lib-file_concat",
   "issues_url": "https://github.com/electrical/puppet-lib-file_concat/issues",
@@ -68,6 +68,21 @@
       "operatingsystemrelease": [
         "10",
         "11"
+      ]
+    },
+    {
+      "operatingsystem": "Windows",
+      "operatingsystemrelease": [
+        "Server 2003 R2",
+        "Server 2008 R2",
+        "Server 2012",
+        "Server 2012 R2"
+      ]
+    },
+    {
+      "operatingsystem": "OSX",
+      "operatingsystemrelease": [
+        "10.9"
       ]
     }
   ],

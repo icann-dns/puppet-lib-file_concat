@@ -1,8 +1,4 @@
-require 'puppet/type/file/owner'
-require 'puppet/type/file/group'
-require 'puppet/type/file/mode'
 require 'puppet/util/checksums'
-require 'puppet/type/file/source'
 
 Puppet::Type.newtype(:file_concat) do
   @doc = "Gets all the file fragments and puts these into the target file.
@@ -12,11 +8,13 @@ Puppet::Type.newtype(:file_concat) do
       File_fragment <<| tag == 'unique_tag' |>>
 
       file_concat { '/tmp/file:
-        tag   => 'unique_tag', # Mandatory
-        path  => '/tmp/file', # Optional. If given it overrides the resource name
-        owner => 'root', # Optional. Default to root
-        group => 'root', # Optional. Default to root
-        mode  => '0644'  # Optional. Default to 0644
+        tag            => 'unique_tag', # Mandatory
+        path           => '/tmp/file',  # Optional. If given it overrides the resource name
+        owner          => 'root',       # Optional. Default to undef
+        group          => 'root',       # Optional. Default to undef
+        mode           => '0644',       # Optional. Default to undef
+        order          => 'numeric',    # Optional, Default to 'numeric'
+        ensure_newline => false,        # Optional, Defaults to false
       }
   "
   ensurable do
@@ -25,11 +23,8 @@ Puppet::Type.newtype(:file_concat) do
     defaultto { :present }
   end
 
-  # the file/posix provider will check for the :links property
-  # which does not exist
-  def [](value)
-    return false if value == :links
-    super
+  def exists?
+    self[:ensure] == :present
   end
 
   newparam(:name, :namevar => true) do
@@ -47,54 +42,52 @@ Puppet::Type.newtype(:file_concat) do
     end
   end
 
-  newproperty(:owner, :parent => Puppet::Type::File::Owner) do
+  newparam(:owner) do
     desc "Desired file owner."
-    defaultto 'root'
   end
 
-  newproperty(:group, :parent => Puppet::Type::File::Group) do
+  newparam(:group) do
     desc "Desired file group."
-    defaultto 'root'
   end
 
-  newproperty(:mode, :parent => Puppet::Type::File::Mode) do
+  newparam(:mode) do
     desc "Desired file mode."
-    defaultto '0644'
   end
 
-  newproperty(:content) do
-    desc "Read only attribute. Represents the content."
-
-    include Puppet::Util::Diff
-    include Puppet::Util::Checksums
-
-    defaultto do
-      # only be executed if no :content is set
-      @content_default = true
-      @resource.no_content
-    end
-
-    validate do |val|
-      fail "read-only attribute" unless @content_default
-    end
-
-    def insync?(is)
-      result = super
-      string_file_diff(@resource[:path], @resource.should_content) unless result
-      result
-    end
-
-    def is_to_s(value)
-      md5(value)
-    end
-
-    def should_to_s(value)
-      md5(value)
-    end
+  newparam(:order) do
+    desc "Controls the ordering of fragments. Can be set to alphabetical or numeric."
+    defaultto 'numeric'
   end
 
-  def no_content
-    "\0PLEASE_MANAGE_THIS_WITH_FILE_CONCAT\0"
+  newparam(:backup) do
+    desc "Controls the filebucketing behavior of the final file and see File type reference for its use."
+    defaultto 'puppet'
+  end
+
+  newparam(:replace) do
+    desc "Whether to replace a file that already exists on the local system."
+    defaultto true
+  end
+
+  newparam(:validate_cmd) do
+    desc "Validates file."
+  end
+
+  newparam(:ensure_newline) do
+    desc "Whether to ensure there is a newline after each fragment."
+    defaultto false
+  end
+
+  autorequire(:file) do
+    [self[:path]]
+  end
+
+  autorequire(:file_fragment) do
+    catalog.resources.collect do |r|
+      if r.is_a?(Puppet::Type.type(:file_fragment)) && r[:tag] == self[:tag]
+        r.name
+      end
+    end.compact
   end
 
   def should_content
@@ -110,12 +103,22 @@ Puppet::Type.newtype(:file_concat) do
       content_fragments << ["#{r[:order]}___#{r[:name]}", fragment_content(r)]
     end
 
-    sorted = content_fragments.sort do |a, b|
-      def decompound(d)
-        d.split('___').map { |v| v =~ /^\d+$/ ? v.to_i : v }
-      end
+    if self[:order] == 'numeric'
+      sorted = content_fragments.sort do |a, b|
+        def decompound(d)
+          d.split('___').map { |v| v =~ /^\d+$/ ? v.to_i : v }
+        end
 
-      decompound(a[0]) <=> decompound(b[0])
+        decompound(a[0]) <=> decompound(b[0])
+      end
+    else
+      sorted = content_fragments.sort do |a, b|
+        def decompound(d)
+          d.split('___').first
+        end
+
+        decompound(a[0]) <=> decompound(b[0])
+      end
     end
 
     @generated_content = sorted.map { |cf| cf[1] }.join
@@ -127,35 +130,38 @@ Puppet::Type.newtype(:file_concat) do
     if r[:content].nil? == false
       fragment_content = r[:content]
     elsif r[:source].nil? == false
-      tmp = Puppet::FileServing::Content.indirection.find(r[:source], :environment => catalog.environment)
+      @source = nil
+      Array(r[:source]).each do |source|
+        if Puppet::FileServing::Metadata.indirection.find(source)
+          @source = source 
+          break
+        end
+      end
+      self.fail "Could not retrieve source(s) #{Array(r[:source]).join(", ")}" unless @source
+      tmp = Puppet::FileServing::Content.indirection.find(@source)
       fragment_content = tmp.content unless tmp.nil?
     end
+
+    if self[:ensure_newline]
+      fragment_content << "\n" unless fragment_content =~ /\n$/
+    end
+
     fragment_content
   end
 
-  def stat(*)
-    return @stat if @stat && !@stat == :needs_stat
-    @stat = begin
-      ::File.stat(self[:path])
-    rescue Errno::ENOENT
-      nil
-    rescue Errno::EACCES
-      warning "Could not stat; permission denied"
-      nil
-    end
-  end
+  def eval_generate
+    content = self.should_content
 
-  ### took from original type/file
-  # There are some cases where all of the work does not get done on
-  # file creation/modification, so we have to do some extra checking.
-  def property_fix
-    properties.each do |thing|
-      next unless [:mode, :owner, :group].include?(thing.name)
+    file_opts = {}
+    file_opts[:ensure] = self[:ensure] == :absent ? :absent : :file
+    file_opts[:content] = content if !content.nil? and !content.empty?
 
-      # Make sure we get a new stat object
-      @stat = :needs_stat
-      currentvalue = thing.retrieve
-      thing.sync unless thing.safe_insync?(currentvalue)
+    [:path, :owner, :group, :mode, :replace, :backup].each do |param|
+      unless self[param].nil?
+        file_opts[param] = self[param]
+      end
     end
+
+    [Puppet::Type.type(:file).new(file_opts)]
   end
 end
